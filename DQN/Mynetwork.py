@@ -1,5 +1,19 @@
+'''
+This is a 2-layer Deep Q-learning network, equipped with technique like Double Q learning, 
+prioritized experience replay, aimed at solve open ai gym problems.
+
+reference:
+[1] Human-level control through deep reinforcementlearning. http://www.readcube.com/articles/10.1038/nature14236
+[2] Deep Reinforcement Learning with Double Q-learning. https://arxiv.org/abs/1509.06461
+[3] Prioritized Experience Replay. https://arxiv.org/abs/1511.05952
+
+Author: Ziyang Zhang
+'''
+
 import tensorflow as tf
 import numpy as np
+from PrioritizedMemory import *
+
 
 class DeepQNetwork:
     def __init__(self,
@@ -9,9 +23,11 @@ class DeepQNetwork:
                  learningRate=0.01,
                  discountRate=0.99,
                  epsilon=0.8,
-                 memorySize=2000,
-                 batchSize=50,
-                 undatePeriod=300,
+                 epsilonDecay=0.005,
+                 memorySize=2048,
+                 batchSize=100,
+                 replayPeriod=5,
+                 undatePeriod=50,
                  tensorboard=False):
         
         self.nA = actionNum
@@ -19,21 +35,25 @@ class DeepQNetwork:
         self.lr = learningRate
         self.netS = networkSize
         self.gamma = discountRate
+        self.epsilonMax = epsilon
         self.epsilon = epsilon
-        self.updateP = undatePeriod 
-        self.memoryS = memorySize
-        self.batchS = batchSize
+        self.epsilonD = epsilonDecay # control the speed of epsilon decay
+        self.replayPeriod = replayPeriod # frequncy of learning with respect to action and observation
+        self.batchS = batchSize # then every transition data is studied (batchS/updatePeriod) times 
+                                # in average, if sampled uniformally
+        self.memoryS = memorySize # must be power of two in this network    
+        self.updateP = undatePeriod # of target network
         self.tensorB = tensorboard
-        
-        self.memory = [np.zeros((self.memoryS, 2*self.nF+2)), np.array([False]*self.memoryS)]
-        self.memoryCounter = 0
+        self.memory = Memory(self.memoryS, self.nF)        
+        self.alpha = 0.6 # prioritized experience replay params, for priority utilitiy
+        self.beta = 0.4 # prioritized experience replay params, for importance sampling weight
         self.learningCounter = 0
         self.sess = tf.Session()
         self._bulid_networks() 
         self.sess.run(tf.global_variables_initializer())
           
         if self.tensorB:
-            # $ tensorboard --logdir=logs
+            # tensorboard --logdir=logs
             self.merged = tf.summary.merge_all()
             self.writer = tf.summary.FileWriter("logs/", self.sess.graph)
             
@@ -41,16 +61,16 @@ class DeepQNetwork:
         self.states = tf.placeholder(tf.float32, [None, self.nF], name='state') 
         self.statesNext = tf.placeholder(tf.float32, [None, self.nF], name='stateNext')
         self.targetsHolder = tf.placeholder(tf.float32, [None, self.nA], name='targetsHolder')
+        self.ISweights = tf.placeholder(tf.float32, [None, 1], name='ISweights')
         # online network
-        self.onlineOutputs, self.onlineC = \
+        self.onlineOutputs, self.onlineC, reg = \
         self._initial_network(self.states, 'onlineOutputs', 'onlineParams')
         # target network
-        self.targetOutputs, self.targetC = \
+        self.targetOutputs, self.targetC, _ = \
         self._initial_network(self.statesNext, 'targetOutputs', 'targetParams')
-        tf.summary.tensor_summary('onlineOutputs', self.onlineOutputs)
         # define training op
         with tf.name_scope('loss'):         
-            self.loss = tf.reduce_mean(tf.squared_difference(self.targetsHolder, self.onlineOutputs))
+            self.loss = tf.reduce_mean(self.ISweights*tf.squared_difference(self.targetsHolder, self.onlineOutputs))
             tf.summary.scalar('loss', self.loss)           
         with tf.name_scope('train'):
             self.train_op = tf.train.RMSPropOptimizer(self.lr).minimize(self.loss)
@@ -63,7 +83,7 @@ class DeepQNetwork:
         ''' build a two layer network.
             return, output tensor and collection of parameters
         '''
-        w_initializer = tf.random_normal_initializer(0, 0.5)
+        w_initializer = tf.random_normal_initializer(0, 0.1)
         b_initializer = tf.constant_initializer(0.1)          
         with tf.variable_scope(variable_scope):
             collection = [collection_name, tf.GraphKeys.GLOBAL_VARIABLES]
@@ -82,8 +102,9 @@ class DeepQNetwork:
                                      initializer=b_initializer, collections = collection)             
                 outputs = tf.matmul(l1, W2) + b2
                 tf.summary.histogram('w2', W2)
-                tf.summary.histogram('b2', b2)                
-        return outputs, collection
+                tf.summary.histogram('b2', b2)
+            reg = tf.nn.l2_loss(W1) + tf.nn.l2_loss(W2)
+        return outputs, collection, reg
                
     def choose_action(self, observation):  
         observation = observation[np.newaxis,:]   
@@ -94,53 +115,61 @@ class DeepQNetwork:
         else:
             action = np.random.randint(0, self.nA)      
         return action
-        
-    def sampleBatch(self):
-        if self.memoryCounter > self.memoryS:
-            batch_random = np.random.choice(self.memoryS, size=self.batchS).astype(int)
-        else:
-            batch_random = np.random.choice(self.memoryCounter, size=self.batchS).astype(int)           
-        batch = [self.memory[0][batch_random,:], self.memory[1][batch_random]]       
-        return batch
-        
-    def store_data(self, s, a, r, s_, done):
-        data = np.hstack((s, [a, r], s_))     
-        update_index = self.memoryCounter % self.memoryS
-        self.memory[0][update_index, :] = data
-        self.memory[1][update_index] = done
-        self.memoryCounter += 1
-        
-    def reduce_epsilon(self, difference):
-        self.epsilon -= difference
+
+    def store(self, s, a, r, s_, done):
+        data = []
+        data.append(np.hstack((s, [a, r], s_)).reshape(-1, 2*self.nF+2))
+        data.append([done])
+        predict = self.sess.run(self.onlineOutputs, feed_dict={self.states: data[0][:, :self.nF].reshape(-1,4)})
+        target = self.targets(data)
+        priority = (np.abs(target[0,a]-predict[0,a]) + 0.01) ** self.alpha
+        data.append([priority])
+        self.memory.store_data(data)
+
+    def targets(self, batch):
+        batchS = len(batch[1])
+        targetOutputs, onlineOutputs = \
+        self.sess.run([self.targetOutputs, self.onlineOutputs],
+                      feed_dict={self.statesNext: batch[0][:, -self.nF:], self.states: batch[0][:, :self.nF]})
+        # set future reward of the final state to be 0
+        for i in range(batchS):
+            if batch[1][i] == True:
+                targetOutputs[i, :] = np.zeros(self.nA)
+        # double Q learning target
+        targets = onlineOutputs.copy() # want to change the actions chosen and keep other actions unchanged
+                                       # those unchanged will be subtracted and their position will be 0 in loss
+        actionsToUpdate = batch[0][:, self.nF].astype(int)
+        actionsTargets = np.argmax(onlineOutputs, axis=1)
+        rewards = batch[0][:,self.nF+1] 
+        batchIdx = np.arange(batchS)
+        targets[batchIdx, actionsToUpdate] = \
+                        self.gamma * targetOutputs[batchIdx, actionsTargets] + rewards    
+        return targets
              
     def learn(self):   
         # update target network to be same as online network
         if self.learningCounter % self.updateP == 0:
             self.sess.run(self.update_target_op)
             print('target network updated')
-        # targets and predictions
-        batch = self.sampleBatch()
-        targetOutputs, onlineOutputs = \
-        self.sess.run([self.targetOutputs, self.onlineOutputs],
-                      feed_dict={self.statesNext: batch[0][:, -self.nF:], self.states: batch[0][:, :self.nF]})
-        # set future reward of the final state to be 0
-        for i in range(self.batchS):
-            if batch[1][i] == True:
-                targetOutputs[i, :] = np.zeros(self.nA)
-        # double Q learning target
-        targets = onlineOutputs.copy()
-        actionsToUpdate = batch[0][:, self.nF].astype(int)
-        actionsTargets = np.argmax(onlineOutputs, axis=1)
-        rewards = batch[0][:,self.nF+1] 
-        batchIdx = np.arange(self.batchS)
-        targets[batchIdx, actionsToUpdate] = \
-                        self.gamma * targetOutputs[batchIdx, actionsTargets] + rewards
+        # update priorities
+        batch, batchRandomI = self.memory.sample_batch(self.batchS)
+        targets = self.targets(batch)
+        predictions = self.sess.run(self.onlineOutputs, feed_dict={self.states: batch[0][:, :self.nF]})
+        priorities = (np.sum(np.abs(targets-predictions), axis=1) + 0.01) ** self.alpha
+        self.memory.update_priorities(batchRandomI, priorities)
+        # importance sampling weight
+        ISW = ((self.memory.minPriority / priorities) ** self.beta).reshape(-1, 1)
         # train
-        _ = self.sess.run(self.train_op, \
-            feed_dict = {self.targetsHolder: targets, self.states: batch[0][:, :self.nF]})
+        self.sess.run(self.train_op, \
+            feed_dict = {self.targetsHolder: targets, self.states: batch[0][:, :self.nF], self.ISweights: ISW})
         self.learningCounter += 1
+        self.reduce_epsilon()
         # log to tensorboard
-        if self.tensorB and self.learningCounter % 5 == 0:
-            s = self.sess.run(self.merged, \
-                              feed_dict={self.targetsHolder: targets, self.states: batch[0][:, :self.nF]})
+        if self.tensorB and self.learningCounter % 3 == 0:
+            s = self.sess.run(self.merged, feed_dict={self.targetsHolder: targets, 
+                                                      self.states: batch[0][:, :self.nF], 
+                                                      self.ISweights: ISW})
             self.writer.add_summary(s, self.learningCounter)
+            
+    def reduce_epsilon(self):
+        self.epsilon = self.epsilonMax * np.exp(-self.epsilonD*self.learningCounter)
