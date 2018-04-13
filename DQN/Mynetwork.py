@@ -63,10 +63,10 @@ class DeepQNetwork:
         self.targetsHolder = tf.placeholder(tf.float32, [None, self.nA], name='targetsHolder')
         self.ISweights = tf.placeholder(tf.float32, [None, 1], name='ISweights')
         # online network
-        self.onlineOutputs, self.onlineC, reg = \
+        self.onlineOutputs, self.onlineC = \
         self._initial_network(self.states, 'onlineOutputs', 'onlineParams')
         # target network
-        self.targetOutputs, self.targetC, _ = \
+        self.targetOutputs, self.targetC = \
         self._initial_network(self.statesNext, 'targetOutputs', 'targetParams')
         # define training op
         with tf.name_scope('loss'):         
@@ -92,7 +92,7 @@ class DeepQNetwork:
                                      initializer=w_initializer, collections = collection)
                 b1 = tf.get_variable('b1', [1, self.netS], tf.float32,
                                      initializer=b_initializer, collections = collection)               
-                l1 = tf.nn.relu(tf.matmul(inputs, W1) + b1)
+                l1 = tf.nn.leaky_relu(tf.matmul(inputs, W1) + b1)
                 tf.summary.histogram('w1', W1)
                 tf.summary.histogram('b1', b1)
             with tf.variable_scope('l2'):                
@@ -103,8 +103,10 @@ class DeepQNetwork:
                 outputs = tf.matmul(l1, W2) + b2
                 tf.summary.histogram('w2', W2)
                 tf.summary.histogram('b2', b2)
-            reg = tf.nn.l2_loss(W1) + tf.nn.l2_loss(W2)
-        return outputs, collection, reg
+                # I'm not sure if regularization is needed, 
+                # but it doesn't seem to be helpful when I use it.
+#            reg = tf.nn.l2_loss(W1) + tf.nn.l2_loss(W2) 
+        return outputs, collection
                
     def choose_action(self, observation):  
         observation = observation[np.newaxis,:]   
@@ -120,13 +122,13 @@ class DeepQNetwork:
         data = []
         data.append(np.hstack((s, [a, r], s_)).reshape(-1, 2*self.nF+2))
         data.append([done])
-        predict = self.sess.run(self.onlineOutputs, feed_dict={self.states: data[0][:, :self.nF].reshape(-1,4)})
-        target = self.targets(data)
+        predict = self.sess.run(self.onlineOutputs, feed_dict={self.states: data[0][:, :self.nF].reshape(-1,self.nF)})
+        target = self._targets(data)
         priority = (np.abs(target[0,a]-predict[0,a]) + 0.01) ** self.alpha
         data.append([priority])
         self.memory.store_data(data)
 
-    def targets(self, batch):
+    def _targets(self, batch):
         batchS = len(batch[1])
         targetOutputs, onlineOutputs = \
         self.sess.run([self.targetOutputs, self.onlineOutputs],
@@ -146,14 +148,14 @@ class DeepQNetwork:
                         self.gamma * targetOutputs[batchIdx, actionsTargets] + rewards    
         return targets
              
-    def learn(self):   
+    def learn(self):
         # update target network to be same as online network
         if self.learningCounter % self.updateP == 0:
             self.sess.run(self.update_target_op)
             print('target network updated')
         # update priorities
         batch, batchRandomI = self.memory.sample_batch(self.batchS)
-        targets = self.targets(batch)
+        targets = self._targets(batch)
         predictions = self.sess.run(self.onlineOutputs, feed_dict={self.states: batch[0][:, :self.nF]})
         priorities = (np.sum(np.abs(targets-predictions), axis=1) + 0.01) ** self.alpha
         self.memory.update_priorities(batchRandomI, priorities)
@@ -161,9 +163,11 @@ class DeepQNetwork:
         ISW = ((self.memory.minPriority / priorities) ** self.beta).reshape(-1, 1)
         # train
         self.sess.run(self.train_op, \
-            feed_dict = {self.targetsHolder: targets, self.states: batch[0][:, :self.nF], self.ISweights: ISW})
+            feed_dict = {self.targetsHolder: targets, 
+                         self.states: batch[0][:, :self.nF], 
+                         self.ISweights: ISW})
         self.learningCounter += 1
-        self.reduce_epsilon()
+        self._reduce_epsilon()
         # log to tensorboard
         if self.tensorB and self.learningCounter % 3 == 0:
             s = self.sess.run(self.merged, feed_dict={self.targetsHolder: targets, 
@@ -171,5 +175,5 @@ class DeepQNetwork:
                                                       self.ISweights: ISW})
             self.writer.add_summary(s, self.learningCounter)
             
-    def reduce_epsilon(self):
+    def _reduce_epsilon(self):
         self.epsilon = self.epsilonMax * np.exp(-self.epsilonD*self.learningCounter)

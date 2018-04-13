@@ -1,3 +1,6 @@
+"""
+@author: antaressgzz
+"""
 import gym
 from Mynetwork import DeepQNetwork
 import matplotlib.pyplot as plt
@@ -15,7 +18,7 @@ net = DeepQNetwork(actionNum=env.action_space.n,
                    featureNum=env.observation_space.shape[0],
                    networkSize=20,
                    discountRate=0.95,
-                   epsilon=0.3,
+                   epsilon=0.4,
                    epsilonDecay=0.001,
                    replayPeriod=10,
                    undatePeriod=50,
@@ -23,7 +26,7 @@ net = DeepQNetwork(actionNum=env.action_space.n,
                    tensorboard=True,
                    memorySize=2048)
 
-totalEpisode = 500
+totalEpisode = 1000
 rewardsRecords = []
 memoryTotal = 0
 
@@ -39,20 +42,20 @@ for episode in range(totalEpisode):
         episodeRewards += reward
         net.store(observation, action, reward, observation_, done)      
         memoryTotal += 1
-        if memoryTotal >= net.memoryS and memoryTotal % net.replayPeriod == 0 and counter <= 5:
+        if memoryTotal >= net.memoryS and memoryTotal % net.replayPeriod == 0 and counter <= 10:
             net.learn()      
         if done:
             print('episode: ', episode, 'reward: ', episodeRewards, 'epsilon: ', net.epsilon)
             break    
         observation = observation_
         episodeLength += 1
-    if episodeRewards > 250:
+    if episodeRewards > 500:
         counter += 1
     else:
         counter = 0
     rewardsRecords.append(episodeRewards)
 
 plt.plot(np.arange(len(rewardsRecords)), rewardsRecords)
-plt.ylabel('Cost')
+plt.ylabel('Rewards')
 plt.xlabel('episode')
 plt.show()
