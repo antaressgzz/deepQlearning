@@ -23,6 +23,7 @@ class DeepQNetwork:
                  learningRate=0.01,
                  discountRate=0.99,
                  epsilon=0.8,
+                 epsilonMin=0,
                  epsilonDecay=0.005,
                  memorySize=2048,
                  batchSize=100,
@@ -36,6 +37,7 @@ class DeepQNetwork:
         self.netS = networkSize
         self.gamma = discountRate
         self.epsilonMax = epsilon
+        self.epsilonMin = epsilonMin
         self.epsilon = epsilon
         self.epsilonD = epsilonDecay # control the speed of epsilon decay
         self.replayPeriod = replayPeriod # frequncy of learning with respect to action and observation
@@ -45,8 +47,8 @@ class DeepQNetwork:
         self.updateP = undatePeriod # of target network
         self.tensorB = tensorboard
         self.memory = Memory(self.memoryS, self.nF)        
-        self.alpha = 0.6 # prioritized experience replay params, for priority utilitiy
-        self.beta = 0.4 # prioritized experience replay params, for importance sampling weight
+        self.alpha = 0.6 # prioritized experience replay params, for priority utilitiy, [3]
+        self.beta = 0.4 # prioritized experience replay params, for importance sampling weight,[3]
         self.learningCounter = 0
         self.sess = tf.Session()
         self._bulid_networks() 
@@ -110,7 +112,7 @@ class DeepQNetwork:
                
     def choose_action(self, observation):  
         observation = observation[np.newaxis,:]   
-        # epsilon greedy    
+        # epsilon greedy
         if np.random.rand() > self.epsilon:
             actionValues = self.sess.run(self.onlineOutputs, feed_dict={self.states: observation})
             action = np.argmax(actionValues)
@@ -124,7 +126,8 @@ class DeepQNetwork:
         data.append([done])
         predict = self.sess.run(self.onlineOutputs, feed_dict={self.states: data[0][:, :self.nF].reshape(-1,self.nF)})
         target = self._targets(data)
-        priority = (np.abs(target[0,a]-predict[0,a]) + 0.01) ** self.alpha
+        best_action = np.argmax(predict, axis=1)[0]
+        priority = (np.abs(target[0,best_action]-predict[0,a]) + 0.01) ** self.alpha
         data.append([priority])
         self.memory.store_data(data)
 
@@ -137,7 +140,7 @@ class DeepQNetwork:
         for i in range(batchS):
             if batch[1][i] == True:
                 targetOutputs[i, :] = np.zeros(self.nA)
-        # double Q learning target
+        # double Q learning target,[2]
         targets = onlineOutputs.copy() # want to change the actions chosen and keep other actions unchanged
                                        # those unchanged will be subtracted and their position will be 0 in loss
         actionsToUpdate = batch[0][:, self.nF].astype(int)
@@ -153,13 +156,13 @@ class DeepQNetwork:
         if self.learningCounter % self.updateP == 0:
             self.sess.run(self.update_target_op)
             print('target network updated')
-        # update priorities
+        # update priorities,[3]
         batch, batchRandomI = self.memory.sample_batch(self.batchS)
         targets = self._targets(batch)
         predictions = self.sess.run(self.onlineOutputs, feed_dict={self.states: batch[0][:, :self.nF]})
         priorities = (np.sum(np.abs(targets-predictions), axis=1) + 0.01) ** self.alpha
         self.memory.update_priorities(batchRandomI, priorities)
-        # importance sampling weight
+        # importance sampling weight, [3]
         ISW = ((self.memory.minPriority / priorities) ** self.beta).reshape(-1, 1)
         # train
         self.sess.run(self.train_op, \
@@ -176,4 +179,4 @@ class DeepQNetwork:
             self.writer.add_summary(s, self.learningCounter)
             
     def _reduce_epsilon(self):
-        self.epsilon = self.epsilonMax * np.exp(-self.epsilonD*self.learningCounter)
+        self.epsilon = self.epsilonMin + (self.epsilonMax-self.epsilonMin) * np.exp(-self.epsilonD*self.learningCounter)

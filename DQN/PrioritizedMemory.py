@@ -1,6 +1,6 @@
 '''
-This tree data only structure stores the priority in the position corresponding to the 
-outside memory, which is indicated by self.pointer. The actual data information is stored
+This tree data structure stores the priority in the position corresponding to the memory, 
+which is indicated by self.pointer. The actual data information is stored
 in in outside memory.
 
 reference:

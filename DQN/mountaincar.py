@@ -17,10 +17,11 @@ print(env.observation_space.low)
 
 net = DeepQNetwork(actionNum=env.action_space.n,
                    featureNum=env.observation_space.shape[0],
-                   learningRate=0.1,
+                   learningRate=0.01,
                    networkSize=10,
                    discountRate=0.99,
-                   epsilon=0.5,
+                   epsilon=0.6,
+                   epsilonMin=0.1,
                    epsilonDecay=0.0005,
                    replayPeriod=5,
                    undatePeriod=500,
@@ -28,7 +29,7 @@ net = DeepQNetwork(actionNum=env.action_space.n,
                    tensorboard=True,
                    memorySize=4096)
 
-totalEpisode = 50
+totalEpisode = 500
 rewardsRecords = []
 memoryTotal = 0
 
@@ -47,7 +48,7 @@ for episode in range(totalEpisode):
         if memoryTotal >= net.memoryS and memoryTotal % net.replayPeriod == 0:
             net.learn()
             if net.learningCounter % net.updateP == 0:
-                print('reward: ', episodeRewards, 'epsilon: ', net.epsilon)
+                print('intermediate reward: ', episodeRewards, 'epsilon: ', net.epsilon)
         if done:           
             print('episode: ', episode,'reward: ', episodeRewards)
             break    
